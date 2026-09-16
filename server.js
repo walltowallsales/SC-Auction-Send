@@ -49,10 +49,15 @@ async function updateTags(id,tags){
   return p
 }
 async function endListing(id){
-  // SellerChamp installations can differ. Zero quantity is set first; then request inactive status.
-  await sc(`/api/products/${id}`,{method:'PUT',body:JSON.stringify({product:{marketplace_status:'inactive'}})});
+  // SellerChamp's product UI/API uses marketplace_manually_removed to distinguish
+  // listings intentionally removed from a marketplace. Setting marketplace_status
+  // alone does not end an active listing, so explicitly mark it removed as well.
+  await sc(`/api/products/${id}`,{method:'PUT',body:JSON.stringify({product:{marketplace_manually_removed:true,marketplace_status:'inactive'}})});
+  // Give SellerChamp a moment to reflect the marketplace change before verification.
+  await new Promise(r=>setTimeout(r,1200));
   const p=await fullProduct(id),s=statusOf(p);
-  if(!['inactive','ended','ended_listing','not_listed'].includes(s)) throw Error(`Quantity is zero, but SellerChamp still reports listing status ${s.toUpperCase()}. The auction tag was left in place so this item remains visible for follow-up.`);
+  const removed=first(p,'marketplace_manually_removed')===true;
+  if(!removed && !['inactive','ended','ended_listing','not_listed'].includes(s)) throw Error(`Quantity is zero, but SellerChamp still reports listing status ${s.toUpperCase()} and did not confirm marketplace removal. The auction tag was left in place so this item remains visible for follow-up.`);
   return p;
 }
 app.get('/api/config',(req,res)=>res.json({pinRequired:!!process.env.APP_PIN,authenticated:valid(req),loginDays:30}));

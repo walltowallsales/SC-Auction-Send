@@ -1,10 +1,3 @@
-# SellerChamp Auction Inventory V1.6
+SellerChamp Auction Inventory V1.7
 
-Fixes SellerChamp tag writes by using the confirmed `tags_array` product field.
-
-For a completed auction item the app preserves unrelated tags, removes `auction` / `auction some`, and adds `Sent to Auction`.
-
-Render:
-- Build command: `npm install`
-- Start command: `npm start`
-- Environment: `SELLERCHAMP_API_TOKEN`, `APP_PIN`
+Adds an automatic elapsed-time stopwatch during inventory loads and explicitly marks marketplace listings as manually removed when sending inventory to auction, while retaining verification and tag safety checks.
