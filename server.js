@@ -43,6 +43,35 @@ async function endListing(id){
 app.get('/api/config',(req,res)=>res.json({pinRequired:!!process.env.APP_PIN,authenticated:valid(req),loginDays:30}));
 app.post('/api/pin',(req,res)=>{const ok=!process.env.APP_PIN||String(req.body.pin||'')===process.env.APP_PIN;if(ok&&process.env.APP_PIN)res.setHeader('Set-Cookie',`${AUTH_COOKIE}=${encodeURIComponent(makeToken())}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${AUTH_MAX_AGE}; Secure`);res.json({ok})});
 app.use('/api',needPin);
+app.get('/api/diagnostic/sku/:sku',async(req,res)=>{
+  try{
+    const sku=String(req.params.sku||'').trim();
+    if(!sku)return res.status(400).json({error:'SKU required.'});
+    const list=await sc(`/api/products?sku=${encodeURIComponent(sku)}&page=1&page_size=50`);
+    const row=(list.products||[]).find(x=>String(x.sku||'').toLowerCase()===sku.toLowerCase())||(list.products||[])[0];
+    if(!row)return res.status(404).json({error:`SKU ${sku} was not found.`});
+    let full=null, fullError='';
+    try{full=await fullProduct(row.id)}catch(e){fullError=e.message}
+    const candidate=full||row;
+    const tagLike={};
+    for(const [k,v] of Object.entries(candidate||{})) if(/tag/i.test(k)) tagLike[k]=v;
+    const listTagLike={};
+    for(const [k,v] of Object.entries(row||{})) if(/tag/i.test(k)) listTagLike[k]=v;
+    res.json({
+      sku,
+      id:row.id,
+      list_keys:Object.keys(row||{}).sort(),
+      full_keys:Object.keys(full||{}).sort(),
+      list_tag_fields:listTagLike,
+      full_tag_fields:tagLike,
+      parsed_tags_from_list:tagsOf(row),
+      parsed_tags_from_full:tagsOf(full||{}),
+      full_lookup_error:fullError,
+      list_product:row,
+      full_product:full
+    });
+  }catch(e){res.status(500).json({error:e.message})}
+});
 app.get('/api/auction-products',async(req,res)=>{
   try{
     let found=[],seen=new Set();
