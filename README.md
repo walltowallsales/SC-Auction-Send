@@ -1,5 +1,5 @@
-# SellerChamp Auction Inventory V1.3 Diagnostic
+# SellerChamp Auction Inventory V1.4
 
-Temporary diagnostic build. It looks up known SKU 190125752 directly and displays the SellerChamp fields related to tags. It does not scan the catalog.
+Fixes SellerChamp tag detection by reading the `tags_array` field discovered by the diagnostic. The inventory loader now scans only paginated product-list responses and requests inventory-location details only for matching `auction` / `auction some` products. It no longer fetches every full product record.
 
 Render: Build `npm install`; Start `npm start`. Environment variables: `SELLERCHAMP_API_TOKEN`, `APP_PIN`.
