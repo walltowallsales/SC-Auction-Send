@@ -33,3 +33,9 @@ Then add the two environment variables above.
 
 ## V1.1 fix
 Product tags are checked from each full SellerChamp product record because the catalog list response may omit tags. This fixes false 0-product results for auction tags.
+
+
+## V1.2
+- Fixed SellerChamp 429 / too-many-requests errors by serializing API calls, pacing requests, and automatically retrying with backoff.
+- Attempts server-side tag filtering first so the app does not normally need to request every product individually.
+- Keeps a paced fallback scan for SellerChamp accounts that ignore tag-filter parameters.

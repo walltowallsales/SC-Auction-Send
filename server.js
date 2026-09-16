@@ -10,7 +10,19 @@ function makeToken(){const exp=Math.floor(Date.now()/1000)+AUTH_MAX_AGE,s=crypto
 function valid(req){if(!process.env.APP_PIN)return true;const [e,s]=(cookies(req)[AUTH_COOKIE]||'').split('.');if(!e||!s||Number(e)<Date.now()/1000)return false;const x=crypto.createHmac('sha256',secret()).update(e).digest('hex');try{return crypto.timingSafeEqual(Buffer.from(s),Buffer.from(x))}catch{return false}}
 function needPin(req,res,next){return valid(req)?next():res.status(401).json({error:'PIN required.',pin_required:true})}
 function token(){if(!process.env.SELLERCHAMP_API_TOKEN)throw Error('SELLERCHAMP_API_TOKEN is not configured.');return process.env.SELLERCHAMP_API_TOKEN}
-async function sc(ep,opt={}){const r=await fetch(SC_BASE+ep,{...opt,headers:{Token:token(),'Content-Type':'application/json',...(opt.headers||{})}});const t=await r.text();let b={};try{b=t?JSON.parse(t):{}}catch{b={raw:t}}if(!r.ok)throw Error(b?.error||b?.message||`SellerChamp returned ${r.status}`);return b}
+let scQueue=Promise.resolve(), lastScAt=0;
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function scDirect(ep,opt={}){
+  for(let attempt=0;attempt<6;attempt++){
+    const wait=Math.max(0,700-(Date.now()-lastScAt)); if(wait)await sleep(wait); lastScAt=Date.now();
+    const r=await fetch(SC_BASE+ep,{...opt,headers:{Token:token(),'Content-Type':'application/json',...(opt.headers||{})}});
+    const t=await r.text();let b={};try{b=t?JSON.parse(t):{}}catch{b={raw:t}}
+    if(r.status===429){await sleep(Math.min(12000,2000*Math.pow(1.7,attempt)));continue}
+    if(!r.ok)throw Error(b?.error||b?.message||`SellerChamp returned ${r.status}`);return b;
+  }
+  throw Error('SellerChamp is still rate-limiting requests. Please wait about 30 seconds and tap Refresh again.');
+}
+function sc(ep,opt={}){const job=scQueue.then(()=>scDirect(ep,opt));scQueue=job.catch(()=>{});return job}
 const first=(o,...ks)=>{for(const k of ks)if(o&&o[k]!=null&&o[k]!=='')return o[k];return null};
 function tagsOf(p){let v=first(p,'tags','tag_list','product_tags');if(Array.isArray(v))return v.map(x=>typeof x==='string'?x:(x.name||x.tag||'')).filter(Boolean);if(typeof v==='string')return v.split(',').map(x=>x.trim()).filter(Boolean);return []}
 function imageOf(p){let v=first(p,'image_url','main_image_url','thumbnail_url','primary_image_url');if(v)return v;let a=first(p,'image_urls','images');if(Array.isArray(a)&&a.length){let x=a[0];return typeof x==='string'?x:(x.url||x.image_url||'')}if(typeof a==='string')return a.split(',')[0].trim();return ''}
@@ -33,32 +45,44 @@ app.post('/api/pin',(req,res)=>{const ok=!process.env.APP_PIN||String(req.body.p
 app.use('/api',needPin);
 app.get('/api/auction-products',async(req,res)=>{
   try{
-    let found=[],seen=new Set(),previousPageKey='';
-    // SellerChamp's catalog/list response does not always include product tags.
-    // V1.0 filtered the compact list rows before loading full products, which could
-    // incorrectly produce zero results. Load full product records first, then inspect tags.
-    for(let page=1;page<=250;page++){
-      const j=await sc(`/api/products?page=${page}&page_size=100`),batch=j.products||[];
-      if(!batch.length)break;
-      const pageKey=batch.map(x=>x.id).join(',');
-      if(page>1&&pageKey===previousPageKey)break;
-      previousPageKey=pageKey;
-      for(let i=0;i<batch.length;i+=10){
-        const chunk=batch.slice(i,i+10);
-        const detailed=await Promise.all(chunk.map(async p0=>{try{return await fullProduct(p0.id)}catch{return p0}}));
-        for(const p of detailed){
-          if(!p?.id||seen.has(p.id))continue;
-          seen.add(p.id);
-          const ts=tagsOf(p).map(x=>String(x).trim().toLowerCase());
-          if(ts.includes('auction')||ts.includes('auction some')){
-            found.push(summary(p,await invOf(p.id)));
-          }
-        }
+    let found=[],seen=new Set();
+    // Ask SellerChamp to filter by tag first. This avoids fetching every product one-by-one
+    // and prevents the API rate-limit problem seen in V1.1.
+    const tagQueries=['auction','auction some'];
+    let candidates=[];
+    for(const tag of tagQueries){
+      for(const param of ['tag','tags']){
+        try{
+          const j=await sc(`/api/products?${param}=${encodeURIComponent(tag)}&page=1&page_size=100`);
+          for(const p of (j.products||[])) if(p?.id&&!candidates.some(x=>x.id===p.id)) candidates.push(p);
+        }catch{}
       }
-      // Honor pagination metadata when SellerChamp provides it; otherwise continue
-      // until an empty/repeated page rather than assuming the requested page size.
-      const totalPages=Number(j.total_pages||j.pages||j.meta?.total_pages||0);
-      if(totalPages&&page>=totalPages)break;
+    }
+    // Verify the returned candidates using the full product record because compact list
+    // rows do not consistently contain tags.
+    for(const p0 of candidates){
+      let p;try{p=await fullProduct(p0.id)}catch{p=p0}
+      const ts=tagsOf(p).map(x=>String(x).trim().toLowerCase());
+      if((ts.includes('auction')||ts.includes('auction some'))&&!seen.has(p.id)){
+        seen.add(p.id);found.push(summary(p,await invOf(p.id)));
+      }
+    }
+    // Some SellerChamp accounts may ignore tag filters. If so, do a deliberately paced
+    // catalog scan. Requests are serialized and 429 responses automatically back off.
+    if(!found.length){
+      let previousPageKey='';
+      for(let page=1;page<=250;page++){
+        const j=await sc(`/api/products?page=${page}&page_size=100`),batch=j.products||[];
+        if(!batch.length)break;
+        const pageKey=batch.map(x=>x.id).join(',');if(page>1&&pageKey===previousPageKey)break;previousPageKey=pageKey;
+        for(const p0 of batch){
+          if(!p0?.id||seen.has(p0.id))continue;
+          let p;try{p=await fullProduct(p0.id)}catch{p=p0}
+          const ts=tagsOf(p).map(x=>String(x).trim().toLowerCase());
+          if(ts.includes('auction')||ts.includes('auction some')){seen.add(p.id);found.push(summary(p,await invOf(p.id)))}
+        }
+        const totalPages=Number(j.total_pages||j.pages||j.meta?.total_pages||0);if(totalPages&&page>=totalPages)break;
+      }
     }
     found.sort((a,b)=>(a.location||'ZZZZ').localeCompare(b.location||'ZZZZ',undefined,{numeric:true,sensitivity:'base'})||a.title.localeCompare(b.title));
     res.json({products:found,count:found.length});
