@@ -37,7 +37,17 @@ async function invOf(id){try{return (await sc(`/api/products/${id}/inventory_loc
 function normInv(a){return a.map(x=>({id:x.id,location:x.location||'',quantity:Number(x.quantity_available||0),priority:x.priority||1,delete_if_empty:x.delete_if_empty!==false})).sort((a,b)=>(a.location||'').localeCompare(b.location||'',undefined,{numeric:true,sensitivity:'base'}))}
 function summary(p,inv){const locations=normInv(inv),tags=tagsOf(p),auctionTags=tags.filter(t=>['auction','auction some'].includes(t.toLowerCase()));return {id:p.id,sku:p.sku||'',title:p.title||'',image:imageOf(p),tags,auction_tags:auctionTags,status:statusOf(p),locations,location:locations.map(x=>x.location).filter(Boolean).join(', ')||first(p,'item_location','bin_location','warehouse_location')||'',quantity:locations.length?locations.reduce((n,x)=>n+x.quantity,0):Number(first(p,'quantity_available','quantity','quantity_on_hand')||0)}}
 async function setLocationQty(id,loc,qty){const inv=await invOf(id);const row=inv.find(x=>String(x.location||'').toLowerCase()===String(loc||'').toLowerCase());if(!row)throw Error(`Inventory location ${loc||'(blank)'} was not found.`);await sc(`/api/products/${id}/inventory_locations/${row.id}`,{method:'PUT',body:JSON.stringify({inventory_location:{location:row.location,quantity_available:qty,delete_if_empty:row.delete_if_empty!==false,priority:row.priority||1}})})}
-async function updateTags(id,tags){await sc(`/api/products/${id}`,{method:'PUT',body:JSON.stringify({product:{tags}})});const p=await fullProduct(id),actual=tagsOf(p).map(x=>x.toLowerCase());for(const t of tags)if(!actual.includes(t.toLowerCase()))throw Error('SellerChamp did not confirm the tag update. Quantity changes were kept, but the auction tag was not removed.');return p}
+async function updateTags(id,tags){
+  // SellerChamp exposes product tags as `tags_array` on the full product record.
+  // Preserve every unrelated tag and write the complete replacement array back.
+  await sc(`/api/products/${id}`,{method:'PUT',body:JSON.stringify({product:{tags_array:tags}})});
+  const p=await fullProduct(id),actual=tagsOf(p).map(x=>String(x).trim().toLowerCase());
+  const wanted=tags.map(x=>String(x).trim().toLowerCase());
+  const missing=wanted.filter(t=>!actual.includes(t));
+  const auctionLeft=actual.filter(t=>t==='auction'||t==='auction some');
+  if(missing.length||auctionLeft.length)throw Error(`SellerChamp did not confirm the tag update. Current tags: ${tagsOf(p).join(', ')||'NONE'}. Quantity changes were kept so this item remains visible for follow-up.`);
+  return p
+}
 async function endListing(id){
   // SellerChamp installations can differ. Zero quantity is set first; then request inactive status.
   await sc(`/api/products/${id}`,{method:'PUT',body:JSON.stringify({product:{marketplace_status:'inactive'}})});

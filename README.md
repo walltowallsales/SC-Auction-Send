@@ -1,13 +1,10 @@
-# SellerChamp Auction Inventory V1.5
+# SellerChamp Auction Inventory V1.6
 
-Changes from V1.4:
-- In-memory server cache: normal app opens reuse the latest successful scan immediately.
-- Refresh button forces a fresh SellerChamp scan.
-- Displays Last updated time.
-- Expanded SellerChamp image-field detection and, only for matching auction products missing an image in the list response, checks the full product record for an image.
-- Cache is updated after quantity / Send Some / Send All actions.
+Fixes SellerChamp tag writes by using the confirmed `tags_array` product field.
+
+For a completed auction item the app preserves unrelated tags, removes `auction` / `auction some`, and adds `Sent to Auction`.
 
 Render:
-- Build Command: npm install
-- Start Command: npm start
-- Environment: SELLERCHAMP_API_TOKEN and APP_PIN
+- Build command: `npm install`
+- Start command: `npm start`
+- Environment: `SELLERCHAMP_API_TOKEN`, `APP_PIN`
