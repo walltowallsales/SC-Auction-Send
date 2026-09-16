@@ -25,7 +25,12 @@ async function scDirect(ep,opt={}){
 function sc(ep,opt={}){const job=scQueue.then(()=>scDirect(ep,opt));scQueue=job.catch(()=>{});return job}
 const first=(o,...ks)=>{for(const k of ks)if(o&&o[k]!=null&&o[k]!=='')return o[k];return null};
 function tagsOf(p){let v=first(p,'tags_array','tags','tag_list','product_tags');if(Array.isArray(v))return v.map(x=>typeof x==='string'?x:(x.name||x.tag||'')).filter(Boolean);if(typeof v==='string')return v.split(',').map(x=>x.trim()).filter(Boolean);return []}
-function imageOf(p){let v=first(p,'image_url','main_image_url','thumbnail_url','primary_image_url');if(v)return v;let a=first(p,'image_urls','images');if(Array.isArray(a)&&a.length){let x=a[0];return typeof x==='string'?x:(x.url||x.image_url||'')}if(typeof a==='string')return a.split(',')[0].trim();return ''}
+function imageOf(p){
+  const direct=['image_url','main_image_url','thumbnail_url','primary_image_url','image','thumbnail','main_image','primary_image','picture_url','photo_url'];
+  for(const k of direct){const v=p&&p[k];if(typeof v==='string'&&/^https?:\/\//i.test(v))return v;if(v&&typeof v==='object'){const u=v.url||v.image_url||v.src||v.original_url||v.medium_url||v.large_url;if(u)return u}}
+  for(const k of ['image_urls','images','photos','pictures','product_images']){const a=p&&p[k];if(Array.isArray(a)&&a.length){for(const x of a){if(typeof x==='string'&&x)return x;if(x&&typeof x==='object'){const u=x.url||x.image_url||x.src||x.original_url||x.medium_url||x.large_url||x.thumbnail_url;if(u)return u}}}if(typeof a==='string'&&a.trim())return a.split(',')[0].trim()}
+  return ''
+}
 function statusOf(p){return String(first(p,'marketplace_status','status')||'unknown').toLowerCase()}
 async function fullProduct(id){const j=await sc(`/api/products/${id}`);return j.product||j}
 async function invOf(id){try{return (await sc(`/api/products/${id}/inventory_locations`)).inventory_locations||[]}catch{return []}}
@@ -72,8 +77,14 @@ app.get('/api/diagnostic/sku/:sku',async(req,res)=>{
     });
   }catch(e){res.status(500).json({error:e.message})}
 });
+
+let auctionCache={products:null,updatedAt:null};
+function cacheRemove(id){if(auctionCache.products)auctionCache.products=auctionCache.products.filter(p=>String(p.id)!==String(id));auctionCache.updatedAt=new Date().toISOString()}
+function cacheUpsert(prod){if(!auctionCache.products||!prod)return;const i=auctionCache.products.findIndex(p=>String(p.id)===String(prod.id));if(i>=0)auctionCache.products[i]=prod;else auctionCache.products.push(prod);auctionCache.products.sort((a,b)=>(a.location||'ZZZZ').localeCompare(b.location||'ZZZZ',undefined,{numeric:true,sensitivity:'base'})||(a.title||'').localeCompare(b.title||''));auctionCache.updatedAt=new Date().toISOString()}
+
 app.get('/api/auction-products',async(req,res)=>{
   try{
+    if(req.query.refresh!=='1'&&auctionCache.products)return res.json({products:auctionCache.products,count:auctionCache.products.length,cached:true,updatedAt:auctionCache.updatedAt});
     // SellerChamp exposes tags in `tags_array`. Scan the paginated product LIST only;
     // do not fetch every product individually. This is fast and avoids API rate limits.
     const found=[]; const seen=new Set();
@@ -85,17 +96,21 @@ app.get('/api/auction-products',async(req,res)=>{
         if((ts.includes('auction')||ts.includes('auction some'))&&!seen.has(p.id)){
           seen.add(p.id);
           // Inventory locations are only requested for the small number of matching items.
-          found.push(summary(p,await invOf(p.id)));
+          let detail=p;
+          // Full product records often contain the image even when the list record does not.
+          if(!imageOf(detail)){try{detail=await fullProduct(p.id)}catch{}}
+          found.push(summary(detail,await invOf(p.id)));
         }
       }
       if(batch.length<100) break;
     }
     found.sort((a,b)=>(a.location||'ZZZZ').localeCompare(b.location||'ZZZZ',undefined,{numeric:true,sensitivity:'base'})||(a.title||'').localeCompare(b.title||''));
-    res.json({products:found,count:found.length});
+    auctionCache={products:found,updatedAt:new Date().toISOString()};
+    res.json({products:found,count:found.length,cached:false,updatedAt:auctionCache.updatedAt});
   }catch(e){res.status(e.status||500).json({error:e.message})}
 });
 
-app.post('/api/products/:id/quantity',async(req,res)=>{try{const qty=Number(req.body.quantity),loc=String(req.body.location||'');if(!Number.isInteger(qty)||qty<0)return res.status(400).json({error:'Enter a whole-number quantity of 0 or more.'});await setLocationQty(req.params.id,loc,qty);let p=await fullProduct(req.params.id),inv=await invOf(req.params.id),s=summary(p,inv);if(s.quantity===0){await endListing(req.params.id);let tags=tagsOf(await fullProduct(req.params.id)).filter(t=>!['auction','auction some'].includes(t.toLowerCase()));if(!tags.some(t=>t.toLowerCase()==='sent to auction'))tags.push('Sent to Auction');await updateTags(req.params.id,tags);return res.json({ok:true,removed:true,quantity:0})}res.json({ok:true,product:s})}catch(e){res.status(500).json({error:e.message})}});
-app.post('/api/products/:id/send-some',async(req,res)=>{try{const amount=Number(req.body.amount),loc=String(req.body.location||'');if(!Number.isInteger(amount)||amount<=0)return res.status(400).json({error:'Enter a whole number greater than zero.'});const p=await fullProduct(req.params.id),tags=tagsOf(p).map(x=>x.toLowerCase());if(!tags.includes('auction some'))return res.status(400).json({error:'Send Some is only available for products tagged auction some.'});const inv=normInv(await invOf(req.params.id)),row=inv.find(x=>String(x.location).toLowerCase()===loc.toLowerCase());if(!row)return res.status(400).json({error:'Choose an inventory location.'});if(amount>row.quantity)return res.status(400).json({error:`Only ${row.quantity} available at ${row.location}.`});await setLocationQty(req.params.id,row.location,row.quantity-amount);const after=summary(await fullProduct(req.params.id),await invOf(req.params.id));if(after.quantity===0){await endListing(req.params.id);let nt=tagsOf(await fullProduct(req.params.id)).filter(t=>t.toLowerCase()!=='auction some'&&t.toLowerCase()!=='auction');if(!nt.some(t=>t.toLowerCase()==='sent to auction'))nt.push('Sent to Auction');await updateTags(req.params.id,nt);return res.json({ok:true,removed:true,quantity:0,sent:amount})}res.json({ok:true,product:after,sent:amount})}catch(e){res.status(500).json({error:e.message})}});
-app.post('/api/products/:id/send-all',async(req,res)=>{try{const p=await fullProduct(req.params.id),inv=normInv(await invOf(req.params.id));for(const row of inv)if(row.quantity>0)await setLocationQty(req.params.id,row.location,0);await endListing(req.params.id);let nt=tagsOf(await fullProduct(req.params.id)).filter(t=>!['auction','auction some'].includes(t.toLowerCase()));if(!nt.some(t=>t.toLowerCase()==='sent to auction'))nt.push('Sent to Auction');await updateTags(req.params.id,nt);res.json({ok:true,removed:true})}catch(e){res.status(500).json({error:e.message})}});
+app.post('/api/products/:id/quantity',async(req,res)=>{try{const qty=Number(req.body.quantity),loc=String(req.body.location||'');if(!Number.isInteger(qty)||qty<0)return res.status(400).json({error:'Enter a whole-number quantity of 0 or more.'});await setLocationQty(req.params.id,loc,qty);let p=await fullProduct(req.params.id),inv=await invOf(req.params.id),s=summary(p,inv);if(s.quantity===0){await endListing(req.params.id);let tags=tagsOf(await fullProduct(req.params.id)).filter(t=>!['auction','auction some'].includes(t.toLowerCase()));if(!tags.some(t=>t.toLowerCase()==='sent to auction'))tags.push('Sent to Auction');await updateTags(req.params.id,tags);cacheRemove(req.params.id);return res.json({ok:true,removed:true,quantity:0})}cacheUpsert(s);res.json({ok:true,product:s})}catch(e){res.status(500).json({error:e.message})}});
+app.post('/api/products/:id/send-some',async(req,res)=>{try{const amount=Number(req.body.amount),loc=String(req.body.location||'');if(!Number.isInteger(amount)||amount<=0)return res.status(400).json({error:'Enter a whole number greater than zero.'});const p=await fullProduct(req.params.id),tags=tagsOf(p).map(x=>x.toLowerCase());if(!tags.includes('auction some'))return res.status(400).json({error:'Send Some is only available for products tagged auction some.'});const inv=normInv(await invOf(req.params.id)),row=inv.find(x=>String(x.location).toLowerCase()===loc.toLowerCase());if(!row)return res.status(400).json({error:'Choose an inventory location.'});if(amount>row.quantity)return res.status(400).json({error:`Only ${row.quantity} available at ${row.location}.`});await setLocationQty(req.params.id,row.location,row.quantity-amount);const after=summary(await fullProduct(req.params.id),await invOf(req.params.id));if(after.quantity===0){await endListing(req.params.id);let nt=tagsOf(await fullProduct(req.params.id)).filter(t=>t.toLowerCase()!=='auction some'&&t.toLowerCase()!=='auction');if(!nt.some(t=>t.toLowerCase()==='sent to auction'))nt.push('Sent to Auction');await updateTags(req.params.id,nt);cacheRemove(req.params.id);return res.json({ok:true,removed:true,quantity:0,sent:amount})}cacheUpsert(after);res.json({ok:true,product:after,sent:amount})}catch(e){res.status(500).json({error:e.message})}});
+app.post('/api/products/:id/send-all',async(req,res)=>{try{const p=await fullProduct(req.params.id),inv=normInv(await invOf(req.params.id));for(const row of inv)if(row.quantity>0)await setLocationQty(req.params.id,row.location,0);await endListing(req.params.id);let nt=tagsOf(await fullProduct(req.params.id)).filter(t=>!['auction','auction some'].includes(t.toLowerCase()));if(!nt.some(t=>t.toLowerCase()==='sent to auction'))nt.push('Sent to Auction');await updateTags(req.params.id,nt);cacheRemove(req.params.id);res.json({ok:true,removed:true})}catch(e){res.status(500).json({error:e.message})}});
 app.listen(PORT,()=>console.log(`SellerChamp Auction Inventory running on ${PORT}`));
