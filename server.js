@@ -49,16 +49,21 @@ async function updateTags(id,tags){
   return p
 }
 async function endListing(id){
-  // SellerChamp's product UI/API uses marketplace_manually_removed to distinguish
-  // listings intentionally removed from a marketplace. Setting marketplace_status
-  // alone does not end an active listing, so explicitly mark it removed as well.
-  await sc(`/api/products/${id}`,{method:'PUT',body:JSON.stringify({product:{marketplace_manually_removed:true,marketplace_status:'inactive'}})});
-  // Give SellerChamp a moment to reflect the marketplace change before verification.
-  await new Promise(r=>setTimeout(r,1200));
-  const p=await fullProduct(id),s=statusOf(p);
-  const removed=first(p,'marketplace_manually_removed')===true;
-  if(!removed && !['inactive','ended','ended_listing','not_listed'].includes(s)) throw Error(`Quantity is zero, but SellerChamp still reports listing status ${s.toUpperCase()} and did not confirm marketplace removal. The auction tag was left in place so this item remains visible for follow-up.`);
-  return p;
+  // Official SellerChamp API: DELETE /api/products/:id with delete_product=false
+  // and end_listing_on_marketplace=true ends the marketplace listing while
+  // preserving the SellerChamp product itself. Do NOT delete the marketplace
+  // listing record or linked products.
+  await sc(`/api/products/${id}?delete_product=false&end_listing_on_marketplace=true&delete_listing_on_marketplace=false&delete_linked_products=false`,{method:'DELETE'});
+
+  // Marketplace status can take a moment to synchronize. Poll a few times rather
+  // than assuming the first product read has already reflected the eBay change.
+  let p=null,s='unknown';
+  for(let i=0;i<5;i++){
+    await sleep(i===0?1800:2500);
+    p=await fullProduct(id); s=statusOf(p);
+    if(['inactive','ended','ended_listing','not_listed','removed'].includes(s))return p;
+  }
+  throw Error(`SellerChamp accepted the end-listing request, but still reports listing status ${String(s).toUpperCase()}. The auction tag was left in place so this item remains visible for follow-up.`);
 }
 app.get('/api/config',(req,res)=>res.json({pinRequired:!!process.env.APP_PIN,authenticated:valid(req),loginDays:30}));
 app.post('/api/pin',(req,res)=>{const ok=!process.env.APP_PIN||String(req.body.pin||'')===process.env.APP_PIN;if(ok&&process.env.APP_PIN)res.setHeader('Set-Cookie',`${AUTH_COOKIE}=${encodeURIComponent(makeToken())}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${AUTH_MAX_AGE}; Secure`);res.json({ok})});
@@ -129,33 +134,3 @@ app.post('/api/products/:id/quantity',async(req,res)=>{try{const qty=Number(req.
 app.post('/api/products/:id/send-some',async(req,res)=>{try{const amount=Number(req.body.amount),loc=String(req.body.location||'');if(!Number.isInteger(amount)||amount<=0)return res.status(400).json({error:'Enter a whole number greater than zero.'});const p=await fullProduct(req.params.id),tags=tagsOf(p).map(x=>x.toLowerCase());if(!tags.includes('auction some'))return res.status(400).json({error:'Send Some is only available for products tagged auction some.'});const inv=normInv(await invOf(req.params.id)),row=inv.find(x=>String(x.location).toLowerCase()===loc.toLowerCase());if(!row)return res.status(400).json({error:'Choose an inventory location.'});if(amount>row.quantity)return res.status(400).json({error:`Only ${row.quantity} available at ${row.location}.`});await setLocationQty(req.params.id,row.location,row.quantity-amount);const after=summary(await fullProduct(req.params.id),await invOf(req.params.id));if(after.quantity===0){await endListing(req.params.id);let nt=tagsOf(await fullProduct(req.params.id)).filter(t=>t.toLowerCase()!=='auction some'&&t.toLowerCase()!=='auction');if(!nt.some(t=>t.toLowerCase()==='sent to auction'))nt.push('Sent to Auction');await updateTags(req.params.id,nt);cacheRemove(req.params.id);return res.json({ok:true,removed:true,quantity:0,sent:amount})}cacheUpsert(after);res.json({ok:true,product:after,sent:amount})}catch(e){res.status(500).json({error:e.message})}});
 app.post('/api/products/:id/send-all',async(req,res)=>{try{const p=await fullProduct(req.params.id),inv=normInv(await invOf(req.params.id));for(const row of inv)if(row.quantity>0)await setLocationQty(req.params.id,row.location,0);await endListing(req.params.id);let nt=tagsOf(await fullProduct(req.params.id)).filter(t=>!['auction','auction some'].includes(t.toLowerCase()));if(!nt.some(t=>t.toLowerCase()==='sent to auction'))nt.push('Sent to Auction');await updateTags(req.params.id,nt);cacheRemove(req.params.id);res.json({ok:true,removed:true})}catch(e){res.status(500).json({error:e.message})}});
 app.listen(PORT,()=>console.log(`SellerChamp Auction Inventory running on ${PORT}`));
-
-// V1.8 read-only marketplace diagnostic for known test SKU.
-function marketplaceFields(value,path='',out={}){
-  if(value==null)return out;
-  if(Array.isArray(value)){value.forEach((v,i)=>marketplaceFields(v,`${path}[${i}]`,out));return out}
-  if(typeof value!=='object')return out;
-  for(const [k,v] of Object.entries(value)){
-    const p=path?`${path}.${k}`:k;
-    if(/ebay|market|listing|status|active|inactive|remove|ended|channel|offer|item.?id/i.test(k)) out[p]=v;
-    if(v&&typeof v==='object')marketplaceFields(v,p,out);
-  }
-  return out;
-}
-app.get('/diagnostic-marketplace-2404-40708',needPin,async(req,res)=>{
-  try{
-    const sku='2404-40708';
-    const list=await sc(`/api/products?sku=${encodeURIComponent(sku)}&page=1&page_size=50`);
-    const row=(list.products||[]).find(x=>String(x.sku||'').toLowerCase()===sku.toLowerCase())||(list.products||[])[0];
-    if(!row)return res.status(404).json({error:`SKU ${sku} was not found.`});
-    const full=await fullProduct(row.id);
-    res.json({
-      diagnostic:'READ ONLY — no SellerChamp changes were made',sku,id:row.id,
-      parsed_status:statusOf(full),
-      marketplace_fields_from_list:marketplaceFields(row),
-      marketplace_fields_from_full:marketplaceFields(full),
-      list_keys:Object.keys(row||{}).sort(),full_keys:Object.keys(full||{}).sort(),
-      list_product:row,full_product:full
-    });
-  }catch(e){res.status(500).json({error:e.message})}
-});
