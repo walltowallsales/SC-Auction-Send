@@ -1,4 +1,4 @@
-# SellerChamp Auction Inventory V1.0
+# SellerChamp Auction Inventory V1.1
 
 A separate SellerChamp/Render app for products tagged `auction` or `auction some`.
 
@@ -29,3 +29,7 @@ Upload all files to a new GitHub repository, create a Render Web Service, and us
 - Start command: `npm start`
 
 Then add the two environment variables above.
+
+
+## V1.1 fix
+Product tags are checked from each full SellerChamp product record because the catalog list response may omit tags. This fixes false 0-product results for auction tags.

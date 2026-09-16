@@ -31,7 +31,39 @@ async function endListing(id){
 app.get('/api/config',(req,res)=>res.json({pinRequired:!!process.env.APP_PIN,authenticated:valid(req),loginDays:30}));
 app.post('/api/pin',(req,res)=>{const ok=!process.env.APP_PIN||String(req.body.pin||'')===process.env.APP_PIN;if(ok&&process.env.APP_PIN)res.setHeader('Set-Cookie',`${AUTH_COOKIE}=${encodeURIComponent(makeToken())}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${AUTH_MAX_AGE}; Secure`);res.json({ok})});
 app.use('/api',needPin);
-app.get('/api/auction-products',async(req,res)=>{try{let found=[],seen=new Set();for(let page=1;page<=100;page++){const j=await sc(`/api/products?page=${page}&page_size=100`),batch=j.products||[];for(const p0 of batch){const ts=tagsOf(p0).map(x=>x.toLowerCase());if(ts.includes('auction')||ts.includes('auction some')){let p=p0;try{p=await fullProduct(p0.id)}catch{}const fts=tagsOf(p).map(x=>x.toLowerCase());if((fts.includes('auction')||fts.includes('auction some'))&&!seen.has(p.id)){seen.add(p.id);found.push(summary(p,await invOf(p.id)))}}}if(batch.length<100)break}found.sort((a,b)=>(a.location||'ZZZZ').localeCompare(b.location||'ZZZZ',undefined,{numeric:true,sensitivity:'base'})||a.title.localeCompare(b.title));res.json({products:found,count:found.length})}catch(e){res.status(500).json({error:e.message})}});
+app.get('/api/auction-products',async(req,res)=>{
+  try{
+    let found=[],seen=new Set(),previousPageKey='';
+    // SellerChamp's catalog/list response does not always include product tags.
+    // V1.0 filtered the compact list rows before loading full products, which could
+    // incorrectly produce zero results. Load full product records first, then inspect tags.
+    for(let page=1;page<=250;page++){
+      const j=await sc(`/api/products?page=${page}&page_size=100`),batch=j.products||[];
+      if(!batch.length)break;
+      const pageKey=batch.map(x=>x.id).join(',');
+      if(page>1&&pageKey===previousPageKey)break;
+      previousPageKey=pageKey;
+      for(let i=0;i<batch.length;i+=10){
+        const chunk=batch.slice(i,i+10);
+        const detailed=await Promise.all(chunk.map(async p0=>{try{return await fullProduct(p0.id)}catch{return p0}}));
+        for(const p of detailed){
+          if(!p?.id||seen.has(p.id))continue;
+          seen.add(p.id);
+          const ts=tagsOf(p).map(x=>String(x).trim().toLowerCase());
+          if(ts.includes('auction')||ts.includes('auction some')){
+            found.push(summary(p,await invOf(p.id)));
+          }
+        }
+      }
+      // Honor pagination metadata when SellerChamp provides it; otherwise continue
+      // until an empty/repeated page rather than assuming the requested page size.
+      const totalPages=Number(j.total_pages||j.pages||j.meta?.total_pages||0);
+      if(totalPages&&page>=totalPages)break;
+    }
+    found.sort((a,b)=>(a.location||'ZZZZ').localeCompare(b.location||'ZZZZ',undefined,{numeric:true,sensitivity:'base'})||a.title.localeCompare(b.title));
+    res.json({products:found,count:found.length});
+  }catch(e){res.status(500).json({error:e.message})}
+});
 app.post('/api/products/:id/quantity',async(req,res)=>{try{const qty=Number(req.body.quantity),loc=String(req.body.location||'');if(!Number.isInteger(qty)||qty<0)return res.status(400).json({error:'Enter a whole-number quantity of 0 or more.'});await setLocationQty(req.params.id,loc,qty);let p=await fullProduct(req.params.id),inv=await invOf(req.params.id),s=summary(p,inv);if(s.quantity===0){await endListing(req.params.id);let tags=tagsOf(await fullProduct(req.params.id)).filter(t=>!['auction','auction some'].includes(t.toLowerCase()));if(!tags.some(t=>t.toLowerCase()==='sent to auction'))tags.push('Sent to Auction');await updateTags(req.params.id,tags);return res.json({ok:true,removed:true,quantity:0})}res.json({ok:true,product:s})}catch(e){res.status(500).json({error:e.message})}});
 app.post('/api/products/:id/send-some',async(req,res)=>{try{const amount=Number(req.body.amount),loc=String(req.body.location||'');if(!Number.isInteger(amount)||amount<=0)return res.status(400).json({error:'Enter a whole number greater than zero.'});const p=await fullProduct(req.params.id),tags=tagsOf(p).map(x=>x.toLowerCase());if(!tags.includes('auction some'))return res.status(400).json({error:'Send Some is only available for products tagged auction some.'});const inv=normInv(await invOf(req.params.id)),row=inv.find(x=>String(x.location).toLowerCase()===loc.toLowerCase());if(!row)return res.status(400).json({error:'Choose an inventory location.'});if(amount>row.quantity)return res.status(400).json({error:`Only ${row.quantity} available at ${row.location}.`});await setLocationQty(req.params.id,row.location,row.quantity-amount);const after=summary(await fullProduct(req.params.id),await invOf(req.params.id));if(after.quantity===0){await endListing(req.params.id);let nt=tagsOf(await fullProduct(req.params.id)).filter(t=>t.toLowerCase()!=='auction some'&&t.toLowerCase()!=='auction');if(!nt.some(t=>t.toLowerCase()==='sent to auction'))nt.push('Sent to Auction');await updateTags(req.params.id,nt);return res.json({ok:true,removed:true,quantity:0,sent:amount})}res.json({ok:true,product:after,sent:amount})}catch(e){res.status(500).json({error:e.message})}});
 app.post('/api/products/:id/send-all',async(req,res)=>{try{const p=await fullProduct(req.params.id),inv=normInv(await invOf(req.params.id));for(const row of inv)if(row.quantity>0)await setLocationQty(req.params.id,row.location,0);await endListing(req.params.id);let nt=tagsOf(await fullProduct(req.params.id)).filter(t=>!['auction','auction some'].includes(t.toLowerCase()));if(!nt.some(t=>t.toLowerCase()==='sent to auction'))nt.push('Sent to Auction');await updateTags(req.params.id,nt);res.json({ok:true,removed:true})}catch(e){res.status(500).json({error:e.message})}});
