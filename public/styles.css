@@ -6,3 +6,7 @@
 .selling-price{display:flex;align-items:baseline;gap:8px;margin:8px 0 6px;font-size:14px;color:#5f6b7a}
 .selling-price strong{font-size:22px;line-height:1;color:#172033;letter-spacing:-.02em}
 @media(max-width:700px){.selling-price{margin-top:7px}.selling-price strong{font-size:20px}}
+
+/* V1.13 SellerChamp connection indicator */
+.header-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}.status{font-size:13px;font-weight:800;padding:7px 10px;border-radius:999px;white-space:nowrap;border:1px solid transparent}.status.checking{background:#f2f4f7;color:#475467;border-color:#d0d5dd}.status.ok{background:#ecfdf3;color:#027a48;border-color:#abefc6}.status.bad{background:#fef3f2;color:#b42318;border-color:#fecdca}
+@media(max-width:640px){.header-actions{width:100%;justify-content:space-between}.status{font-size:12px}}

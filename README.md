@@ -1,3 +1,7 @@
+# SellerChamp Auction Inventory V1.13
+
+V1.13 adds the SellerChamp connected/PIN status indicator and logs successful Auction Inventory changes to the same Google Sheets change log used by Location Mover V2.30. Google logging failures do not roll back or falsely report a successful SellerChamp change as failed.
+
 SellerChamp Auction Inventory V1.10
 
 Adds an automatic elapsed-time stopwatch during inventory loads and explicitly marks marketplace listings as manually removed when sending inventory to auction, while retaining verification and tag safety checks.

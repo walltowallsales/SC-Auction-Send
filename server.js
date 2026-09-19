@@ -23,6 +23,17 @@ async function scDirect(ep,opt={}){
   throw Error('SellerChamp is still rate-limiting requests. Please wait about 30 seconds and tap Refresh again.');
 }
 function sc(ep,opt={}){const job=scQueue.then(()=>scDirect(ep,opt));scQueue=job.catch(()=>{});return job}
+
+const CHANGE_LOG_URL = 'https://script.google.com/macros/s/AKfycbw2UHYXOzZajklEXvHf-o5Ht1f6P6e4ifmzWVsRdbyUnVisv-23SUxRrlVr6QMgJk5ZpA/exec';
+async function logChange(entry){
+  try{
+    const response=await fetch(CHANGE_LOG_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(entry),redirect:'follow'});
+    const text=await response.text();let data={};try{data=JSON.parse(text)}catch{}
+    if(!response.ok||data.success===false)return {logged:false,warning:data.error||`HTTP ${response.status}`};
+    return {logged:true};
+  }catch(e){return {logged:false,warning:e.message||'Google Sheets logging failed'};}
+}
+async function safeLog(entry){try{return await logChange(entry)}catch(e){return {logged:false,warning:e.message||'Google Sheets logging failed'}}}
 const first=(o,...ks)=>{for(const k of ks)if(o&&o[k]!=null&&o[k]!=='')return o[k];return null};
 function tagsOf(p){let v=first(p,'tags_array','tags','tag_list','product_tags');if(Array.isArray(v))return v.map(x=>typeof x==='string'?x:(x.name||x.tag||'')).filter(Boolean);if(typeof v==='string')return v.split(',').map(x=>x.trim()).filter(Boolean);return []}
 function imageOf(p){
@@ -92,6 +103,7 @@ async function endListing(id){
 app.get('/api/config',(req,res)=>res.json({pinRequired:!!process.env.APP_PIN,authenticated:valid(req),loginDays:30}));
 app.post('/api/pin',(req,res)=>{const ok=!process.env.APP_PIN||String(req.body.pin||'')===process.env.APP_PIN;if(ok&&process.env.APP_PIN)res.setHeader('Set-Cookie',`${AUTH_COOKIE}=${encodeURIComponent(makeToken())}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${AUTH_MAX_AGE}; Secure`);res.json({ok})});
 app.use('/api',needPin);
+app.get('/api/status',async(req,res)=>{try{const data=await sc('/api/marketplace_accounts');res.json({ok:true,version:'1.13.0',pinRequired:!!process.env.APP_PIN,accounts:(data.marketplace_accounts||[]).map(a=>({id:a.id,name:a.name,marketplace:a.marketplace}))})}catch(e){res.status(e.status||500).json({error:'Could not connect to SellerChamp.',details:e.message})}});
 app.get('/api/diagnostic/sku/:sku',async(req,res)=>{
   try{
     const sku=String(req.params.sku||'').trim();
@@ -154,7 +166,59 @@ app.get('/api/auction-products',async(req,res)=>{
   }catch(e){res.status(e.status||500).json({error:e.message})}
 });
 
-app.post('/api/products/:id/quantity',async(req,res)=>{try{const qty=Number(req.body.quantity),loc=String(req.body.location||'');if(!Number.isInteger(qty)||qty<0)return res.status(400).json({error:'Enter a whole-number quantity of 0 or more.'});await setLocationQty(req.params.id,loc,qty);let p=await fullProduct(req.params.id),inv=await invOf(req.params.id),s=summary(p,inv);if(s.quantity===0){await endListing(req.params.id);let tags=tagsOf(await fullProduct(req.params.id)).filter(t=>!['auction','auction some'].includes(t.toLowerCase()));if(!tags.some(t=>t.toLowerCase()==='sent to auction'))tags.push('Sent to Auction');await updateTags(req.params.id,tags);cacheRemove(req.params.id);return res.json({ok:true,removed:true,quantity:0})}cacheUpsert(s);res.json({ok:true,product:s})}catch(e){res.status(500).json({error:e.message})}});
-app.post('/api/products/:id/send-some',async(req,res)=>{try{const amount=Number(req.body.amount),loc=String(req.body.location||'');if(!Number.isInteger(amount)||amount<=0)return res.status(400).json({error:'Enter a whole number greater than zero.'});const p=await fullProduct(req.params.id),tags=tagsOf(p).map(x=>x.toLowerCase());if(!tags.includes('auction some'))return res.status(400).json({error:'Send Some is only available for products tagged auction some.'});const inv=normInv(await invOf(req.params.id)),row=inv.find(x=>String(x.location).toLowerCase()===loc.toLowerCase());if(!row)return res.status(400).json({error:'Choose an inventory location.'});if(amount>row.quantity)return res.status(400).json({error:`Only ${row.quantity} available at ${row.location}.`});await setLocationQty(req.params.id,row.location,row.quantity-amount);const after=summary(await fullProduct(req.params.id),await invOf(req.params.id));if(after.quantity===0){await endListing(req.params.id);let nt=tagsOf(await fullProduct(req.params.id)).filter(t=>t.toLowerCase()!=='auction some'&&t.toLowerCase()!=='auction');if(!nt.some(t=>t.toLowerCase()==='sent to auction'))nt.push('Sent to Auction');await updateTags(req.params.id,nt);cacheRemove(req.params.id);return res.json({ok:true,removed:true,quantity:0,sent:amount})}cacheUpsert(after);res.json({ok:true,product:after,sent:amount})}catch(e){res.status(500).json({error:e.message})}});
-app.post('/api/products/:id/send-all',async(req,res)=>{try{const p=await fullProduct(req.params.id),inv=normInv(await invOf(req.params.id));for(const row of inv)if(row.quantity>0)await setLocationQty(req.params.id,row.location,0);await endListing(req.params.id);let nt=tagsOf(await fullProduct(req.params.id)).filter(t=>!['auction','auction some'].includes(t.toLowerCase()));if(!nt.some(t=>t.toLowerCase()==='sent to auction'))nt.push('Sent to Auction');await updateTags(req.params.id,nt);cacheRemove(req.params.id);res.json({ok:true,removed:true})}catch(e){res.status(500).json({error:e.message})}});
+app.post('/api/products/:id/quantity',async(req,res)=>{try{
+  const qty=Number(req.body.quantity),loc=String(req.body.location||'');
+  if(!Number.isInteger(qty)||qty<0)return res.status(400).json({error:'Enter a whole-number quantity of 0 or more.'});
+  const beforeP=await fullProduct(req.params.id),beforeInv=normInv(await invOf(req.params.id));
+  const beforeRow=beforeInv.find(x=>String(x.location||'').toLowerCase()===loc.toLowerCase());
+  const oldQty=beforeRow?beforeRow.quantity:null;
+  await setLocationQty(req.params.id,loc,qty);
+  let p=await fullProduct(req.params.id),inv=await invOf(req.params.id),s=summary(p,inv);
+  if(s.quantity===0){
+    await endListing(req.params.id);
+    let tags=tagsOf(await fullProduct(req.params.id)).filter(t=>!['auction','auction some'].includes(t.toLowerCase()));
+    if(!tags.some(t=>t.toLowerCase()==='sent to auction'))tags.push('Sent to Auction');
+    await updateTags(req.params.id,tags);cacheRemove(req.params.id);
+    const log=await safeLog({app:'Auction Inventory',action:'Quantity Updated / Sent to Auction',sku:beforeP.sku||'',title:beforeP.title||'',oldLocation:loc,newLocation:loc,quantity:qty,details:`Quantity changed from ${oldQty??''} to ${qty}; total quantity reached zero; listing ended; auction tag removed; Sent to Auction added`});
+    return res.json({ok:true,removed:true,quantity:0,log});
+  }
+  cacheUpsert(s);
+  const log=await safeLog({app:'Auction Inventory',action:'Quantity Updated',sku:beforeP.sku||'',title:beforeP.title||'',oldLocation:loc,newLocation:loc,quantity:qty,details:`Quantity changed from ${oldQty??''} to ${qty}`});
+  res.json({ok:true,product:s,log});
+}catch(e){res.status(500).json({error:e.message})}});
+
+app.post('/api/products/:id/send-some',async(req,res)=>{try{
+  const amount=Number(req.body.amount),loc=String(req.body.location||'');
+  if(!Number.isInteger(amount)||amount<=0)return res.status(400).json({error:'Enter a whole number greater than zero.'});
+  const p=await fullProduct(req.params.id),tags=tagsOf(p).map(x=>x.toLowerCase());
+  if(!tags.includes('auction some'))return res.status(400).json({error:'Send Some is only available for products tagged auction some.'});
+  const inv=normInv(await invOf(req.params.id)),row=inv.find(x=>String(x.location).toLowerCase()===loc.toLowerCase());
+  if(!row)return res.status(400).json({error:'Choose an inventory location.'});
+  if(amount>row.quantity)return res.status(400).json({error:`Only ${row.quantity} available at ${row.location}.`});
+  await setLocationQty(req.params.id,row.location,row.quantity-amount);
+  const after=summary(await fullProduct(req.params.id),await invOf(req.params.id));
+  if(after.quantity===0){
+    await endListing(req.params.id);
+    let nt=tagsOf(await fullProduct(req.params.id)).filter(t=>t.toLowerCase()!=='auction some'&&t.toLowerCase()!=='auction');
+    if(!nt.some(t=>t.toLowerCase()==='sent to auction'))nt.push('Sent to Auction');
+    await updateTags(req.params.id,nt);cacheRemove(req.params.id);
+    const log=await safeLog({app:'Auction Inventory',action:'Send Some / Sent to Auction',sku:p.sku||'',title:p.title||'',oldLocation:row.location,newLocation:'Auction',quantity:amount,details:`Sent ${amount}; location quantity ${row.quantity} to ${row.quantity-amount}; total reached zero; listing ended; Sent to Auction added`});
+    return res.json({ok:true,removed:true,quantity:0,sent:amount,log});
+  }
+  cacheUpsert(after);
+  const log=await safeLog({app:'Auction Inventory',action:'Send Some',sku:p.sku||'',title:p.title||'',oldLocation:row.location,newLocation:'Auction',quantity:amount,details:`Sent ${amount}; location quantity ${row.quantity} to ${row.quantity-amount}`});
+  res.json({ok:true,product:after,sent:amount,log});
+}catch(e){res.status(500).json({error:e.message})}});
+
+app.post('/api/products/:id/send-all',async(req,res)=>{try{
+  const p=await fullProduct(req.params.id),inv=normInv(await invOf(req.params.id));
+  const total=inv.reduce((n,x)=>n+x.quantity,0),locations=inv.filter(x=>x.quantity>0).map(x=>`${x.location||'NO LOCATION'} (${x.quantity})`).join(', ');
+  for(const row of inv)if(row.quantity>0)await setLocationQty(req.params.id,row.location,0);
+  await endListing(req.params.id);
+  let nt=tagsOf(await fullProduct(req.params.id)).filter(t=>!['auction','auction some'].includes(t.toLowerCase()));
+  if(!nt.some(t=>t.toLowerCase()==='sent to auction'))nt.push('Sent to Auction');
+  await updateTags(req.params.id,nt);cacheRemove(req.params.id);
+  const log=await safeLog({app:'Auction Inventory',action:'Send to Auction',sku:p.sku||'',title:p.title||'',oldLocation:locations,newLocation:'Auction',quantity:total,details:'All remaining quantity set to zero; marketplace listing ended; auction tag removed; Sent to Auction added'});
+  res.json({ok:true,removed:true,log});
+}catch(e){res.status(500).json({error:e.message})}});
 app.listen(PORT,()=>console.log(`SellerChamp Auction Inventory running on ${PORT}`));
