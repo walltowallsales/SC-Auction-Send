@@ -15,3 +15,7 @@ SellerChamp's documented product DELETE endpoint is now used with `delete_produc
 - Added View in SellerChamp button
 - No Print Label button
 - SellerChamp V1.9 quantity, listing-end, tag, cache, PIN, and stopwatch behavior preserved
+
+
+## V1.11 browser cache
+Auction inventory is saved in the browser. On later visits the saved list displays immediately while a fresh SellerChamp scan runs in the background. Successful quantity and auction actions update the browser cache immediately. No paid Render disk is required.
