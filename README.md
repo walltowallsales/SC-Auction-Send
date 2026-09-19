@@ -17,5 +17,10 @@ SellerChamp's documented product DELETE endpoint is now used with `delete_produc
 - SellerChamp V1.9 quantity, listing-end, tag, cache, PIN, and stopwatch behavior preserved
 
 
-## V1.11 browser cache
+## V1.12 browser cache
 Auction inventory is saved in the browser. On later visits the saved list displays immediately while a fresh SellerChamp scan runs in the background. Successful quantity and auction actions update the browser cache immediately. No paid Render disk is required.
+
+
+## V1.12
+- Adds the current SellerChamp selling price to each auction inventory card.
+- Uses price data from the existing product-list response where available, avoiding extra per-item API calls and preserving the V1.11 browser-cache/background-refresh behavior.

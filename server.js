@@ -35,7 +35,31 @@ function statusOf(p){return String(first(p,'marketplace_status','status')||'unkn
 async function fullProduct(id){const j=await sc(`/api/products/${id}`);return j.product||j}
 async function invOf(id){try{return (await sc(`/api/products/${id}/inventory_locations`)).inventory_locations||[]}catch{return []}}
 function normInv(a){return a.map(x=>({id:x.id,location:x.location||'',quantity:Number(x.quantity_available||0),priority:x.priority||1,delete_if_empty:x.delete_if_empty!==false})).sort((a,b)=>(a.location||'').localeCompare(b.location||'',undefined,{numeric:true,sensitivity:'base'}))}
-function summary(p,inv){const locations=normInv(inv),tags=tagsOf(p),auctionTags=tags.filter(t=>['auction','auction some'].includes(t.toLowerCase()));return {id:p.id,sku:p.sku||'',title:p.title||'',image:imageOf(p),tags,auction_tags:auctionTags,status:statusOf(p),locations,location:locations.map(x=>x.location).filter(Boolean).join(', ')||first(p,'item_location','bin_location','warehouse_location')||'',quantity:locations.length?locations.reduce((n,x)=>n+x.quantity,0):Number(first(p,'quantity_available','quantity','quantity_on_hand')||0)}}
+function priceOf(p){
+  // Use price data already returned by SellerChamp's product list so showing the
+  // selling price does not add another API request per item.
+  const direct=first(p,'selling_price','sale_price','marketplace_price','listing_price','ebay_price','price');
+  if(direct!=null&&direct!==''){
+    const n=Number(typeof direct==='object'?(direct.amount??direct.value):direct);
+    if(Number.isFinite(n))return n;
+  }
+  for(const k of ['marketplace_listing','marketplace','listing','ebay_listing']){
+    const o=p&&p[k]; if(o&&typeof o==='object'){
+      const v=first(o,'selling_price','sale_price','marketplace_price','listing_price','price','amount');
+      const n=Number(typeof v==='object'?(v.amount??v.value):v); if(Number.isFinite(n))return n;
+    }
+  }
+  for(const k of ['marketplace_listings','marketplaces','listings']){
+    const a=p&&p[k]; if(Array.isArray(a)) for(const o of a){
+      const name=String(first(o,'marketplace_name','name','marketplace')||'').toLowerCase();
+      if(name&&name!=='ebay')continue;
+      const v=first(o,'selling_price','sale_price','marketplace_price','listing_price','price','amount');
+      const n=Number(typeof v==='object'?(v.amount??v.value):v); if(Number.isFinite(n))return n;
+    }
+  }
+  return null;
+}
+function summary(p,inv){const locations=normInv(inv),tags=tagsOf(p),auctionTags=tags.filter(t=>['auction','auction some'].includes(t.toLowerCase()));return {id:p.id,sku:p.sku||'',title:p.title||'',image:imageOf(p),price:priceOf(p),tags,auction_tags:auctionTags,status:statusOf(p),locations,location:locations.map(x=>x.location).filter(Boolean).join(', ')||first(p,'item_location','bin_location','warehouse_location')||'',quantity:locations.length?locations.reduce((n,x)=>n+x.quantity,0):Number(first(p,'quantity_available','quantity','quantity_on_hand')||0)}}
 async function setLocationQty(id,loc,qty){const inv=await invOf(id);const row=inv.find(x=>String(x.location||'').toLowerCase()===String(loc||'').toLowerCase());if(!row)throw Error(`Inventory location ${loc||'(blank)'} was not found.`);await sc(`/api/products/${id}/inventory_locations/${row.id}`,{method:'PUT',body:JSON.stringify({inventory_location:{location:row.location,quantity_available:qty,delete_if_empty:row.delete_if_empty!==false,priority:row.priority||1}})})}
 async function updateTags(id,tags){
   // SellerChamp exposes product tags as `tags_array` on the full product record.

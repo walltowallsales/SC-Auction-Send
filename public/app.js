@@ -39,6 +39,7 @@ function render(){
     <div class="product-info">
       <div class="sku-label">SKU</div><div class="sku-value">${skuHtml(p.sku)}</div>
       <div class="title">${esc(p.title)}</div>
+      <div class="selling-price"><span>Selling Price</span><strong>${p.price!=null&&Number.isFinite(Number(p.price))?`$${Number(p.price).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`:'Not available'}</strong></div>
       <div class="meta"><span class="pill auction">${esc(p.auction_tags.join(', '))}</span><span class="pill ${p.status==='active'?'active':'inactive'}">${esc(p.status.toUpperCase())}</span><span class="pill"><b>Qty ${p.quantity}</b></span></div>
     </div>
     <div class="controls">
